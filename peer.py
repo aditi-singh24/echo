@@ -1,9 +1,8 @@
 """
-peer.py  (Module 1: Core Messaging)
-
+peer.py (Module 1: Core Messaging)
 Serverless LAN chat. Each peer is a tiny post office:
-  - a mailbox (listening socket, background thread)
-  - a carrier (sending socket, opened per message)
+  - a mailbox      (listening socket, background thread)
+  - a carrier      (sending socket, opened per message)
   - an address book (peer table from peers.json)
 
 Run:
@@ -13,51 +12,40 @@ Module 1 is DIRECT messaging only. No routing, forwarding, ACKs or
 heartbeats yet. The "type", "hops" and "ttl" fields are already in the
 message format so Modules 2 and 3 can plug in without changing it.
 
-peer.py  (Module 2: Routing and Forwarding)
- 
+peer.py (Module 2: Routing and Forwarding)
 Serverless LAN chat. Each peer is a tiny post office with a road map:
   - a mailbox      (listening socket, background thread)
   - a carrier      (sending socket, opened per message)
   - an address book (direct neighbours from peers.json)
   - a road map     (routing table, learned with Distance Vector)
   - a night watch  (heartbeats that detect dead neighbours)
- 
-Run:
-    python peer.py --id A --port 5001 --config peers.json
- 
+
 Message types (same JSON format as Module 1):
   chat       a user message, may be forwarded across several peers
   heartbeat  "I am alive", sent to direct neighbours only
   dv         a distance vector (my routing table), direct neighbours only
- 
+
 "hops" counts how many times a chat message was RELAYED.
 A direct message has hops 0. A message A -> B -> C arrives with hops 1.
 
-peer.py  (Module 3: Reliability)
+peer.py (Module 3: Reliability)
+Adds registered post (ACKs, retries and delivery status).
 
-Serverless LAN chat. Each peer is a tiny post office with a road map:
-  - a mailbox      (listening socket, background thread)
-  - a carrier      (sending socket, opened per message)
-  - an address book (direct neighbours from peers.json)
-  - a road map     (routing table, learned with Distance Vector)
-  - a night watch  (heartbeats that detect dead neighbours)
-  - registered post (ACKs, retries and delivery status)
-
-Run:
-    python peer.py --id A --port 5001 --config peers.json
-
-Message types (same JSON format as Module 1):
-  chat       a user message, may be forwarded across several peers
-  heartbeat  "I am alive", sent to direct neighbours only
-  dv         a distance vector (my routing table), direct neighbours only
   ack        "I received message <id>", travels back to the sender
 
-"hops" counts how many times a chat message was RELAYED.
-A direct message has hops 0. A message A -> B -> C arrives with hops 1.
+Encryption (added)
+  Chat text is locked in a box before it leaves the sender and unlocked
+  only at the final receiver. Relays pass the locked box along.
+  Built with the Python standard library only (no pip install needed).
+  Every peer must use the same SHARED_SECRET below.
 """
 
 import argparse
+import base64
+import hashlib
+import hmac
 import json
+import os
 import socket
 import sys
 import threading
@@ -71,16 +59,75 @@ import zlib
 
 DEFAULT_TTL = 5
 REQUIRED_FIELDS = ("id", "type", "src", "dst", "payload", "hops", "ttl", "crc")
-CONNECT_TIMEOUT = 3       # seconds, chat messages
-HEARTBEAT_TIMEOUT = 1     # seconds, heartbeats and routing updates
+CONNECT_TIMEOUT = 3      # seconds, chat messages
+HEARTBEAT_TIMEOUT = 1    # seconds, heartbeats and routing updates
+HEARTBEAT_INTERVAL = 2   # send a heartbeat every 2 s
+DEAD_AFTER = 6           # neighbour is dead after 6 s of silence
+DV_INTERVAL = 5          # periodic routing update every 5 s
+INFINITY = 16            # cost meaning "unreachable" (used for poison reverse)
+ACK_TIMEOUT = 3          # wait this long for an ack before retrying
+MAX_RETRIES = 3          # retries after the first send, then mark FAILED
 
-HEARTBEAT_INTERVAL = 2    # send a heartbeat every 2 s
-DEAD_AFTER = 6            # neighbour is dead after 6 s of silence
-DV_INTERVAL = 5           # periodic routing update every 5 s
-INFINITY = 16             # cost meaning "unreachable" (used for poison reverse)
+# The group password. Every peer must have the SAME value.
+# Change it to your own phrase. Note: this repo is public, so anyone who
+# reads this file can read your messages. Fine for a course demo.
+SHARED_SECRET = "xxxx-change-this-group-password-xxxx"
 
-ACK_TIMEOUT = 3           # wait this long for an ack before retrying
-MAX_RETRIES = 3           # retries after the first send, then mark FAILED
+# ---------------------------------------------------------------------------
+# ENCRYPTION: the locked box (standard library only)
+# ---------------------------------------------------------------------------
+# Turn the password into two separate keys: one to scramble, one to sign.
+_MASTER = hashlib.pbkdf2_hmac("sha256", SHARED_SECRET.encode("utf-8"),
+                              b"echo-lan-chat-v1", 100000, 64)
+_ENC_KEY = _MASTER[:32]
+_MAC_KEY = _MASTER[32:]
+
+
+def _keystream(nonce, length):
+    """Endless scrambling bytes made from the key and a one time nonce."""
+    out = b""
+    counter = 0
+    while len(out) < length:
+        block = hmac.new(_ENC_KEY, nonce + counter.to_bytes(8, "big"),
+                         hashlib.sha256).digest()
+        out += block
+        counter += 1
+    return out[:length]
+
+
+def encrypt_text(text):
+    """
+    Plain text -> one safe-to-send string.
+    Layout: [16 byte nonce][scrambled text][32 byte signature], base64 encoded.
+    A fresh random nonce means the same text never looks the same twice.
+    """
+    data = text.encode("utf-8")
+    nonce = os.urandom(16)
+    scrambled = bytes(a ^ b for a, b in zip(data, _keystream(nonce, len(data))))
+    tag = hmac.new(_MAC_KEY, nonce + scrambled, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(nonce + scrambled + tag).decode("ascii")
+
+
+def decrypt_text(token):
+    """
+    Safe-to-send string -> plain text.
+    Returns None if the signature is wrong (wrong password or tampered).
+    """
+    try:
+        raw = base64.urlsafe_b64decode(str(token).encode("ascii"))
+    except (ValueError, UnicodeEncodeError):
+        return None
+    if len(raw) < 48:
+        return None
+    nonce, scrambled, tag = raw[:16], raw[16:-32], raw[-32:]
+    expected = hmac.new(_MAC_KEY, nonce + scrambled, hashlib.sha256).digest()
+    if not hmac.compare_digest(tag, expected):
+        return None
+    data = bytes(a ^ b for a, b in zip(scrambled, _keystream(nonce, len(scrambled))))
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -105,11 +152,9 @@ def load_peer_table(config_path, my_id):
     """
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
-
     if my_id not in config:
         print(f"Error: '{my_id}' has no section in {config_path}")
         sys.exit(1)
-
     table = {}
     for entry in config[my_id]:
         table[entry["id"]] = entry
@@ -123,9 +168,11 @@ def load_peer_table(config_path, my_id):
 def compute_crc(msg):
     """
     CRC32 over every field except "crc", "hops" and "ttl".
+
     hops and ttl change at every relay, so leaving them out makes the CRC
     an end to end check: whatever the sender wrote is exactly what the
     final receiver verifies, and relays do not need to recompute it.
+
     JSON uses sort_keys and compact separators so both sides produce the
     exact same text for the same fields.
     """
@@ -197,8 +244,8 @@ class Node:
     """
     Everything one peer knows and does.
 
-    routes:  {dest: {"next": neighbour_id, "cost": hops}}
-             cost INFINITY means "no longer reachable".
+    routes: {dest: {"next": neighbour_id, "cost": hops}}
+            cost INFINITY means "no longer reachable".
     """
 
     def __init__(self, my_id, port, neighbours):
@@ -211,11 +258,9 @@ class Node:
         self.trigger = threading.Event()    # "send a routing update now"
         self.running = True
         self.debug = False
-
-        self.pending = {}     # msg id -> entry for every chat I sent
-        self.outbox = []      # msg ids in the order I sent them
-        self.seen = set()     # ids of chats already delivered to me
-
+        self.pending = {}    # msg id -> entry for every chat I sent
+        self.outbox = []     # msg ids in the order I sent them
+        self.seen = set()    # ids of chats already delivered to me
         now = time.time()
         self.routes = {my_id: {"next": my_id, "cost": 0}}
         for nid, n in self.neighbours.items():
@@ -237,7 +282,7 @@ class Node:
         threading.Thread(target=self.heartbeat_loop, daemon=True).start()
         threading.Thread(target=self.dv_loop, daemon=True).start()
         threading.Thread(target=self.retry_loop, daemon=True).start()
-        self.trigger.set()  # first routing update goes out right away
+        self.trigger.set()   # first routing update goes out right away
 
     def send_async(self, peer, data, timeout):
         """Fire and forget, so one slow or dead neighbour never blocks us."""
@@ -258,7 +303,7 @@ class Node:
         while self.running:
             self.trigger.wait(timeout=DV_INTERVAL)
             self.trigger.clear()
-            time.sleep(0.2)  # lets a burst of changes become one update
+            time.sleep(0.2)   # lets a burst of changes become one update
             self.send_dv_to_all()
 
     # ----- neighbour liveness --------------------------------------------
@@ -302,6 +347,7 @@ class Node:
     def vector_for(self, nid):
         """
         My routing table as {dest: cost}, tailored for neighbour nid.
+
         Poison reverse: a route I learned THROUGH nid is advertised back to
         nid with cost INFINITY, so nid never believes I can reach it via nid.
         """
@@ -355,7 +401,7 @@ class Node:
                                  f"cost {new_cost}")
         if notes:
             self.say("\n".join(notes))
-            self.trigger.set()  # table changed, tell the neighbours now
+            self.trigger.set()   # table changed, tell the neighbours now
 
     def next_hop(self, dst):
         """Neighbour to hand a message for dst to, or None if no route."""
@@ -370,12 +416,13 @@ class Node:
     def send_chat(self, dst, text):
         """
         Send a new chat and start tracking it.
+        The text is locked in a box (encrypted) before it is put in the message.
         Returns None if there is no route, else (msg, hop, ok, reason).
         """
         hop = self.next_hop(dst)
         if hop is None:
             return None
-        msg = build_message(self.id, dst, text)
+        msg = build_message(self.id, dst, encrypt_text(text))
         entry = {"msg": msg, "dst": dst, "text": text, "status": "SENT",
                  "retries": 0, "deadline": time.time() + ACK_TIMEOUT}
         with self.lock:
@@ -414,7 +461,7 @@ class Node:
             self.say(f"[FAILED] {short} to {dst}: no ack after "
                      f"{MAX_RETRIES} retries")
             return
-        hop = self.next_hop(dst)  # fresh look at the routing table
+        hop = self.next_hop(dst)   # fresh look at the routing table
         if hop is None:
             self.say(f"[RETRY {n}/{MAX_RETRIES}] {short} to {dst}: "
                      f"no route right now, will look again")
@@ -474,16 +521,26 @@ class Node:
             self.relay(msg)
 
     def deliver(self, msg):
-        """A chat addressed to me: show it once, acknowledge it every time."""
+        """
+        A chat addressed to me: unlock it, show it once, acknowledge it every time.
+        If it cannot be unlocked (wrong password or tampered), drop it and send no ack.
+        """
         with self.lock:
             duplicate = msg["id"] in self.seen
-            self.seen.add(msg["id"])
         if duplicate:
             self.say(f"[DUPLICATE] {msg['id'][:8]} from {msg['src']} "
                      f"ignored, sending the ack again")
-        else:
-            self.say(f"[CRC PASS] from {msg['src']}: {msg['payload']}   "
-                     f"(hops {msg['hops']})")
+            self.send_ack(msg)
+            return
+        text = decrypt_text(msg["payload"])
+        if text is None:
+            self.say(f"[DECRYPT FAIL] message from {msg['src']} dropped "
+                     f"(wrong password or tampered)")
+            return
+        with self.lock:
+            self.seen.add(msg["id"])
+        self.say(f"[CRC PASS] from {msg['src']}: {text} "
+                 f"(hops {msg['hops']}, encrypted)")
         self.send_ack(msg)
 
     def relay(self, msg):
@@ -545,7 +602,7 @@ def listener_loop(server, node):
         try:
             conn, _addr = server.accept()
         except OSError:
-            break  # server socket closed, stop listening
+            break   # server socket closed, stop listening
         threading.Thread(target=handle_connection, args=(conn, node),
                          daemon=True).start()
 
@@ -568,8 +625,8 @@ def start_listener(port, node):
 def print_help(node):
     print(f"\nPeer {node.id} is running.")
     print(f"Direct neighbours: {', '.join(node.neighbours) or '(none)'}")
-    print("Send a message:  <peer_id> <text>     e.g.  C hello there")
-    print("Commands:        /routes  /peers  /status  /debug  /help  /quit\n")
+    print("Send a message: <peer_id> <text>   e.g.  C hello there")
+    print("Commands: /routes /peers /status /debug /help /quit\n")
 
 
 def print_peers(node):
@@ -602,9 +659,9 @@ def print_status(node):
     if not rows:
         print("  (no messages sent yet)")
         return
-    print("  id        to   status     retries  text")
+    print("  id        to    status     retries  text")
     for mid, e in rows:
-        print(f"  {mid[:8]}  {e['dst']:<4} {e['status']:<10} "
+        print(f"  {mid[:8]}  {e['dst']:<4}  {e['status']:<10} "
               f"{e['retries']:<8} {e['text']}")
 
 
@@ -617,7 +674,6 @@ def run_chat_ui(node):
         except (EOFError, KeyboardInterrupt):
             print("\nBye.")
             return
-
         if not line:
             continue
         if line == "/quit":
@@ -640,13 +696,11 @@ def run_chat_ui(node):
             print(f"  debug {'on' if node.debug else 'off'} "
                   f"(shows every heartbeat and routing update)")
             continue
-
         parts = line.split(" ", 1)
         if len(parts) < 2 or not parts[1].strip():
             print("Usage: <peer_id> <text>")
             continue
         dst, text = parts[0], parts[1].strip()
-
         if dst == node.id:
             print("  that is me. Pick another peer.")
             continue
