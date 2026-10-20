@@ -152,7 +152,8 @@ class GuiNode(peer.Node):
         self.last_rtt_ts = 0
         self.forwarded = 0                          # chats/acks I relayed for other peers[cite: 1]
         self.dropped = 0                            # relays dropped: TTL expired, no route, forward failed[cite: 1]
-        self.crc_blocked = 0                        # messages dropped by the CRC check[cite: 1]
+        self.crc_blocked = 0 
+        self.plain = {}                       # messages dropped by the CRC check[cite: 1]
 
     def add(self, rec):
         with self.log_lock:
@@ -186,20 +187,22 @@ class GuiNode(peer.Node):
             self.last_rtt = (time.time() - self.sent_at[mid]) * 1000
             self.last_rtt_ts = time.time()
 
-    def deliver(self, msg):
-        with self.lock:
-            duplicate = msg["id"] in self.seen
-        if not duplicate:
-            self.add({"dir": "in", "peer": msg["src"], "payload": str(msg["payload"]),
-                      "ts": time.time(), "crc_ok": True, "fields": dict(msg)})
-        super().deliver(msg)
+        def deliver(self, msg):
+            with self.lock:
+                duplicate = msg["id"] in self.seen
+            if not duplicate:
+                text = peer.decrypt_text(msg["payload"])
+                if text is not None:
+                    self.add({"dir": "in", "peer": msg["src"], "payload": text,
+                            "ts": time.time(), "crc_ok": True, "fields": dict(msg)})
+            super().deliver(msg)
 
     def send_gui(self, dst, text, corrupt=False):
         """Same as Node.send_chat, plus the demo option to break the CRC[cite: 1]."""
         hop = self.next_hop(dst)
         if hop is None:
             return f"No route to {dst}"
-        msg = peer.build_message(self.id, dst, text)
+        msg = peer.build_message(self.id, dst, peer.encrypt_text(text))
         if corrupt:
             msg["crc"] ^= 1
         entry = {"msg": msg, "dst": dst, "text": text, "status": "SENT",
@@ -208,6 +211,7 @@ class GuiNode(peer.Node):
             self.pending[msg["id"]] = entry
             self.outbox.append(msg["id"])
         self.sent_at[msg["id"]] = time.time()
+        self.plain[msg["id"]] = text
         rec = self.add({"dir": "out", "peer": dst, "mid": msg["id"], "ts": time.time(),
                         "corrupted": corrupt, "note": ""})
         ok, reason = peer.send_to_peer(self.neighbours[hop], peer.serialize(msg))
@@ -470,7 +474,7 @@ class App:
                 continue
             st, retries, msg = pend[rec["mid"]]
             status = names[st]
-            msgs.append(dict(n=rec["n"], dir="out", peer=rec["peer"], payload=msg["payload"], ts=rec["ts"],
+            msgs.append(dict(n=rec["n"], dir="out", peer=rec["peer"], payload=node.plain.get(rec["mid"], msg["payload"]), ts=rec["ts"],
                            status=status, retries=retries, corrupted=rec["corrupted"],
                            reason=f"no ack after {peer.MAX_RETRIES} retries" if status == "failed" else "",
                            note=rec["note"] if status == "sent" else "", fields=msg))

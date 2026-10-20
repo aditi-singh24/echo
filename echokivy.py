@@ -465,6 +465,7 @@ class GuiNode(peer.Node):
         self.sent_at = {}
         self.last_rtt = None
         self.last_rtt_ts = 0
+        self.plain = {}   # msg id -> readable text for my own view
 
     def add(self, rec):
         with self.log_lock:
@@ -496,15 +497,17 @@ class GuiNode(peer.Node):
         with self.lock:
             duplicate = msg["id"] in self.seen
         if not duplicate:
-            self.add({"dir": "in", "peer": msg["src"], "payload": str(msg["payload"]),
-                      "ts": time.time(), "crc_ok": True, "fields": dict(msg)})
+            text = peer.decrypt_text(msg["payload"])
+            if text is not None:
+                self.add({"dir": "in", "peer": msg["src"], "payload": text,
+                          "ts": time.time(), "crc_ok": True, "fields": dict(msg)})
         super().deliver(msg)
 
     def send_gui(self, dst, text, corrupt=False):
         hop = self.next_hop(dst)
         if hop is None:
             return f"No route to {dst}"
-        msg = peer.build_message(self.id, dst, text)
+        msg = peer.build_message(self.id, dst, peer.encrypt_text(text))
         if corrupt:
             msg["crc"] ^= 1
         entry = {"msg": msg, "dst": dst, "text": text, "status": "SENT",
@@ -513,6 +516,7 @@ class GuiNode(peer.Node):
             self.pending[msg["id"]] = entry
             self.outbox.append(msg["id"])
         self.sent_at[msg["id"]] = time.time()
+        self.plain[msg["id"]] = text
         rec = self.add({"dir": "out", "peer": dst, "mid": msg["id"], "ts": time.time(),
                         "corrupted": corrupt, "note": ""})
         ok, reason = peer.send_to_peer(self.neighbours[hop], peer.serialize(msg))
@@ -1135,7 +1139,7 @@ class EchoApp(App):
             if rec["mid"] in pend:
                 st, retries, msg = pend[rec["mid"]]
                 status = names.get(st, "sent")
-                msgs.append(dict(n=rec["n"], dir="out", peer=rec["peer"], payload=msg["payload"],
+                msgs.append(dict(n=rec["n"], dir="out", peer=rec["peer"], payload=node.plain.get(rec["mid"], msg["payload"]),
                                  ts=rec["ts"], status=status, retries=retries, corrupted=rec.get("corrupted", False),
                                  fields=msg))
 
