@@ -522,6 +522,10 @@ class GuiNode(peer.Node):
 
 
 def gui_handle_connection(conn, node):
+    try:
+        remote_ip = conn.getpeername()[0]
+    except OSError:
+        remote_ip = None
     with conn:
         try:
             reader = conn.makefile("r", encoding="utf-8")
@@ -536,6 +540,12 @@ def gui_handle_connection(conn, node):
                                   "ts": time.time(), "dropped": True, "crc_ok": False,
                                   "fields": dict(msg)})
                     continue
+                # Learn a known neighbour's IP from where its heartbeat/dv came from
+                if remote_ip and msg["type"] in ("heartbeat", "dv"):
+                    with node.lock:
+                        n = node.neighbours.get(msg["src"])
+                        if n is not None and n.get("ip") != remote_ip:
+                            n["ip"] = remote_ip
                 node.handle_message(msg)
         except (OSError, UnicodeDecodeError):
             return

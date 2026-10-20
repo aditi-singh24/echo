@@ -4,13 +4,13 @@
   ],
   "B": [
     {"id": "A", "ip": "127.0.0.1", "port": 5001, "status": "up"},
-    {"id": "D", "ip": "10.90.200.69", "port": 5004, "status": "up"}
+    {"id": "D", "ip": "xxxx", "port": 5004, "status": "up"}
   ],
   "C": [
-    {"id": "D", "ip": "10.90.200.69", "port": 5004, "status": "up"}
+    {"id": "D", "ip": "xxxx", "port": 5004, "status": "up"}
   ],
   "D": [
-    {"id": "B", "ip": "10.90.200.182", "port": 5002, "status": "up"},
-    {"id": "C", "ip": "10.90.200.182", "port": 5003, "status": "up"}
+    {"id": "B", "ip": "127.0.0.1", "port": 5002, "status": "up"},
+    {"id": "C", "ip": "127.0.0.1", "port": 5003, "status": "up"}
   ]
 }
