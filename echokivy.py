@@ -132,6 +132,7 @@ def c_rgba(hex_code, alpha=1.0):
 
 C = {k: c_rgba(v) for k, v in HEX_COLORS.items()}
 Window.clearcolor = C["bg"]
+Window.softinput_mode = "below_target"
 
 
 # ============================================================================
@@ -909,10 +910,14 @@ class ChatScreen(Screen):
         comp_box = BoxLayout(size_hint=(1, None), height=dp(44), spacing=dp(6))
         input_card = StickerCard(bg_color=C["white"], shadow_offset=2, radius=5,
                                  size_hint=(1, 1), padding=[dp(8), dp(2), dp(8), dp(2)])
-        self.input_field = TextInput(hint_text="Say hello...", multiline=False, background_color=(0,0,0,0),
-                                     foreground_color=C["ink"], font_size=sp(11.5))
+        self.input_field = TextInput(hint_text="Say hello...", multiline=False,
+                                     background_color=(0, 0, 0, 0),
+                                     foreground_color=C["ink"], font_size=sp(11.5),
+                                     input_type="text", keyboard_mode="auto",
+                                     write_tab=False)
         self.input_field.bind(on_text_validate=lambda inst: self.send_message())
         input_card.add_widget(self.input_field)
+        input_card.bind(on_touch_up=self._focus_input)
         comp_box.add_widget(input_card)
 
         # Chunky Send Button with vector paper-plane icon
@@ -949,6 +954,11 @@ class ChatScreen(Screen):
             self.app_core.toast("Next msg CRC will be broken!")
         else:
             self.corrupt_btn.set_bg(C["yellow"], C["ink"])
+
+    def _focus_input(self, card, touch):
+        if card.collide_point(*touch.pos) and not self.input_field.readonly:
+            Clock.schedule_once(lambda dt: setattr(self.input_field, "focus", True), 0.1)
+        return False
 
     def send_message(self):
         text = self.input_field.text.strip()
