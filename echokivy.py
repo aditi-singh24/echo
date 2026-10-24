@@ -988,9 +988,12 @@ class ChatScreen(Screen):
         self.chat_avatar.peer_id = p["id"]
         self.chat_avatar.update_state(p["reachable"])
 
-        self.input_field.readonly = not p["reachable"]
-        self.send_btn.disabled = not p["reachable"]
-
+        dst = self.app_core.selected_peer
+        st = self.app_core.state
+        p = next((x for x in st["peers"] if x["id"] == dst), None) if st else None
+        if p is None or not p["reachable"]:
+            self.app_core.toast(f"Peer {dst} is unreachable")
+            return
         msgs = [m for m in state["messages"] if m["peer"] == pid]
         self.thread_layout.clear_widgets()
 
