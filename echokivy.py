@@ -1015,6 +1015,7 @@ class EchoApp(App):
         self.known_extra = set()
         self.toasts = queue.Queue()
         self.state = None
+        self._last_sig = None
 
     def build(self):
         self.title = f"Peer {self.node.id} · ECHO Mobile"
@@ -1145,8 +1146,20 @@ class EchoApp(App):
 
         return dict(me=node.id, port=node.port, peers=peers, messages=msgs)
 
+    def make_sig(self, st):
+        """A fingerprint of everything the screens show. Same fingerprint = no redraw."""
+        peers = tuple((p["id"], p["reachable"], p["via"], p["cost"]) for p in st["peers"])
+        msgs = tuple((m.get("n"), m.get("status"), m.get("retries", 0), m.get("note", ""))
+                     for m in st["messages"])
+        return (self.sm.current, self.selected_peer, self.current_tab,
+                self.node.last_rtt_ts, peers, msgs)
+
     def tick(self, dt):
         self.state = self.build_state()
+        sig = self.make_sig(self.state)
+        if sig == self._last_sig:
+            return              # nothing changed, leave the widgets alone
+        self._last_sig = sig
         if self.sm.current == "companions":
             self.companions_screen.update_ui(self.state)
         elif self.sm.current == "chat":
