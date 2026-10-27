@@ -187,15 +187,15 @@ class GuiNode(peer.Node):
             self.last_rtt = (time.time() - self.sent_at[mid]) * 1000
             self.last_rtt_ts = time.time()
 
-        def deliver(self, msg):
-            with self.lock:
-                duplicate = msg["id"] in self.seen
-            if not duplicate:
-                text = peer.decrypt_text(msg["payload"])
-                if text is not None:
-                    self.add({"dir": "in", "peer": msg["src"], "payload": text,
-                            "ts": time.time(), "crc_ok": True, "fields": dict(msg)})
-            super().deliver(msg)
+    def deliver(self, msg):
+        with self.lock:
+            duplicate = msg["id"] in self.seen
+        if not duplicate:
+            text = peer.decrypt_text(msg["payload"])
+            if text is not None:
+                self.add({"dir": "in", "peer": msg["src"], "payload": text,
+                        "ts": time.time(), "crc_ok": True, "fields": dict(msg)})
+        super().deliver(msg)
 
     def send_gui(self, dst, text, corrupt=False):
         """Same as Node.send_chat, plus the demo option to break the CRC[cite: 1]."""
